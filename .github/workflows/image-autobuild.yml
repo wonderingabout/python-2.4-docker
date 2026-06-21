@@ -1,0 +1,53 @@
+name: Image Autobuild
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - Dockerfile
+      - README.md
+      - .github/workflows/image-autobuild.yml
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/python-2.4
+
+jobs:
+  build:
+    name: Build and publish CPython 2.4 image
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Log in to GitHub Container Registry
+        run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build image
+        run: docker build -t "$IMAGE_NAME:ci" .
+
+      - name: Smoke test image
+        run: |
+          docker run --rm "$IMAGE_NAME:ci" python -V
+          docker run --rm "$IMAGE_NAME:ci" python -c 'print "Python 2.4 smoke test OK"'
+          docker run --rm "$IMAGE_NAME:ci" sh -c 'printf "print \"compile test OK\"\n" > /tmp/test.py && python -m py_compile /tmp/test.py'
+
+      - name: Tag image
+        run: |
+          MONTH_TAG="$(date -u +%Y-%m)"
+          docker tag "$IMAGE_NAME:ci" "$IMAGE_NAME:latest"
+          docker tag "$IMAGE_NAME:ci" "$IMAGE_NAME:2.4.6"
+          docker tag "$IMAGE_NAME:ci" "$IMAGE_NAME:$MONTH_TAG"
+
+      - name: Push image
+        run: |
+          docker push "$IMAGE_NAME:latest"
+          docker push "$IMAGE_NAME:2.4.6"
+          MONTH_TAG="$(date -u +%Y-%m)"
+          docker push "$IMAGE_NAME:$MONTH_TAG"
