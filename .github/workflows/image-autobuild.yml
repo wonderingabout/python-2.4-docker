@@ -7,8 +7,10 @@ on:
       - main
     paths:
       - Dockerfile
-      - README.md
       - .github/workflows/image-autobuild.yml
+  schedule:
+    # Monthly rebuild at 03:37 UTC on day 1.
+    - cron: "37 3 1 * *"
 
 permissions:
   contents: read
@@ -16,6 +18,10 @@ permissions:
 
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/python-2.4
+
+concurrency:
+  group: image-autobuild-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
