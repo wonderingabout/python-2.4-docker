@@ -19,7 +19,8 @@ RUN curl -fsSLO "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PY
     && cd "Python-${PYTHON_VERSION}" \
     && ./configure --prefix="/opt/python-${PYTHON_VERSION}" CFLAGS="-O2 -fcommon" \
     && make -j"$(nproc)" \
-    && make install
+    && make install \
+    && install -m 0644 LICENSE "/opt/python-${PYTHON_VERSION}/LICENSE.txt"
 
 FROM debian:bookworm-slim
 

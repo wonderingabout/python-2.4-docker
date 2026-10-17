@@ -1,0 +1,131 @@
+name: Standalone Runtime Autobuild
+
+# <!-- custom: Our usual local Codex agents could already run the Python 2.4 interpreter we installed on our Windows machine; external web ChatGPT could not access that installation.
+# Its separate execution environment, inspected in October 2026, happened to run Linux x86-64 without Python 2.4, preventing the real compatibility check; other or future environments may differ.
+# Add a standalone Linux runtime for AdvCiv-SAS light-source ZIP handoffs to external agents that cannot use the existing Docker image; this does not provide a native Windows interpreter package.
+# Build and publish the shared package here so AdvCiv-SAS, AdvCiv-SAS-NIF-Gallery (Female Leaderheads) and other mods/tools do not each have to host, rebuild and maintain their own runtime.
+# Keep this separate from image-autobuild.yml so standalone archive validation/publication cannot block the existing GHCR image updates. (ChatGPT-5.6-Sol + GPT-6.1-Sol) -->
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - Dockerfile
+      - .github/workflows/runtime-autobuild.yml
+  schedule:
+    # <!-- custom: Independent of the image workflow; this build does not depend on its timing or success. (GPT-6.1-Sol) -->
+    - cron: "47 3 1 * *"
+
+permissions:
+  contents: write
+
+env:
+  IMAGE_NAME: python24-runtime
+  PYTHON_VERSION: 2.4.6
+  RUNTIME_CHANNEL: runtime-linux-x86_64-bookworm
+  RUNTIME_ARCHIVE: python-2.4.6-linux-x86_64-debian-bookworm.tar.gz
+
+concurrency:
+  group: runtime-autobuild-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  runtime:
+    name: Build, test and publish standalone CPython 2.4 runtime
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build runtime image locally
+        run: docker build -t "$IMAGE_NAME:ci" .
+
+      - name: Export standalone Linux runtime
+        run: |
+          set -eux
+          cid="$(docker create "$IMAGE_NAME:ci")"
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          mkdir -p runtime
+          docker cp "$cid:/opt/python-$PYTHON_VERSION" "runtime/python-$PYTHON_VERSION"
+          test -f "runtime/python-$PYTHON_VERSION/LICENSE.txt"
+          test -x "runtime/python-$PYTHON_VERSION/bin/python"
+          tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+            -C runtime -czf "$RUNTIME_ARCHIVE" "python-$PYTHON_VERSION"
+          sha256sum "$RUNTIME_ARCHIVE" > "$RUNTIME_ARCHIVE.sha256"
+          ls -lh "$RUNTIME_ARCHIVE" "$RUNTIME_ARCHIVE.sha256"
+
+      - name: Smoke test exported runtime outside /opt
+        run: |
+          set -eux
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          tar -xzf "$RUNTIME_ARCHIVE" -C "$tmp"
+          PYTHONHOME="$tmp/python-$PYTHON_VERSION" "$tmp/python-$PYTHON_VERSION/bin/python" -V
+          # <!-- custom: A valid relocated compile must succeed first; otherwise an unrelated missing-library failure could masquerade as expected syntax rejection. (GPT-6.1-Sol) -->
+          printf 'value = 1\n' > "$tmp/python24_syntax.py"
+          PYTHONHOME="$tmp/python-$PYTHON_VERSION" "$tmp/python-$PYTHON_VERSION/bin/python" -c 'import py_compile, sys; py_compile.compile(sys.argv[1], None, None, True)' "$tmp/python24_syntax.py"
+          printf 'value = 1 if True else 0\n' > "$tmp/python25_syntax.py"
+          # <!-- custom: Python 2.4 -m py_compile printed SyntaxError but returned success in a reproduced test. Raise compilation errors explicitly so this negative test cannot falsely pass. (GPT-6.1-Sol) -->
+          if PYTHONHOME="$tmp/python-$PYTHON_VERSION" "$tmp/python-$PYTHON_VERSION/bin/python" -c 'import py_compile, sys; py_compile.compile(sys.argv[1], None, None, True)' "$tmp/python25_syntax.py"; then
+            echo "ERROR: Python 2.4 unexpectedly accepted Python 2.5+ conditional-expression syntax" >&2
+            exit 1
+          fi
+
+      - name: Upload runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-2.4.6-linux-x86_64-debian-bookworm
+          path: |
+            ${{ env.RUNTIME_ARCHIVE }}
+            ${{ env.RUNTIME_ARCHIVE }}.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish tested runtime and refresh channel manifest
+        if: github.ref_name == github.event.repository.default_branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha="$(sha256sum "$RUNTIME_ARCHIVE" | cut -d ' ' -f 1)"
+          version_tag="$RUNTIME_CHANNEL-$sha"
+          # <!-- custom: Publish the complete version before changing the channel pointer, so consumers never receive a manifest for an unfinished upload. Version packages are never overwritten after publication. (GPT-6.1-Sol) -->
+          if ! gh release view "$version_tag" >/dev/null 2>&1; then
+            gh release create "$version_tag" --draft --latest=false --target "$GITHUB_SHA" \
+              --title "CPython $PYTHON_VERSION Linux x86-64 ($sha)" \
+              --notes "Tested standalone runtime; Debian bookworm/glibc baseline. CPython license included. Built from $GITHUB_SHA." \
+              "$RUNTIME_ARCHIVE" "$RUNTIME_ARCHIVE.sha256"
+          fi
+          if [ "$(gh release view "$version_tag" --json isDraft --jq .isDraft)" = true ]; then
+            # <!-- custom: A failed draft upload may leave only some assets; retry those before publishing the version. (GPT-6.1-Sol) -->
+            gh release upload "$version_tag" "$RUNTIME_ARCHIVE" "$RUNTIME_ARCHIVE.sha256" --clobber
+            gh release edit "$version_tag" --draft=false --latest=false
+          fi
+          export RUNTIME_SHA256="$sha" RUNTIME_VERSION_TAG="$version_tag"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          repo = os.environ["GITHUB_REPOSITORY"]
+          tag = os.environ["RUNTIME_VERSION_TAG"]
+          archive = os.environ["RUNTIME_ARCHIVE"]
+          manifest = {
+              "schemaVersion": 1,
+              "pythonVersion": os.environ["PYTHON_VERSION"],
+              "platform": "linux-x86_64-debian-bookworm",
+              "archiveName": archive,
+              "archiveUrl": "https://github.com/%s/releases/download/%s/%s" % (repo, tag, archive),
+              "sha256": os.environ["RUNTIME_SHA256"],
+              "sizeBytes": Path(archive).stat().st_size,
+              "releaseTag": tag,
+              "buildCommit": os.environ["GITHUB_SHA"],
+              "validation": "relocated-runtime-valid-and-invalid-python-syntax",
+          }
+          Path("runtime-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          PY
+          if ! gh release view "$RUNTIME_CHANNEL" >/dev/null 2>&1; then
+            gh release create "$RUNTIME_CHANNEL" --latest=false --target "$GITHUB_SHA" \
+              --title "Current tested CPython $PYTHON_VERSION Linux x86-64 runtime" \
+              --notes "Moving channel manifest only. Referenced version packages are retained separately."
+          fi
+          gh release upload "$RUNTIME_CHANNEL" runtime-manifest.json --clobber
+          echo "Runtime archive bytes: $(stat -c %s "$RUNTIME_ARCHIVE")"
+          echo "Current runtime SHA256: $sha"

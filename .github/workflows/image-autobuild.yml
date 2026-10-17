@@ -42,7 +42,8 @@ jobs:
         run: |
           docker run --rm "$IMAGE_NAME:ci" python -V
           docker run --rm "$IMAGE_NAME:ci" python -c 'print "Python 2.4 smoke test OK"'
-          docker run --rm "$IMAGE_NAME:ci" sh -c 'printf "print \"compile test OK\"\n" > /tmp/test.py && python -m py_compile /tmp/test.py'
+          # <!-- custom: Python 2.4 -m py_compile printed SyntaxError but returned zero in a reproduced test; explicitly raise errors so the existing compile smoke test can actually fail. (GPT-6.1-Sol) -->
+          docker run --rm "$IMAGE_NAME:ci" sh -c 'printf "print \"compile test OK\"\n" > /tmp/test.py && python -c "import py_compile; py_compile.compile(\"/tmp/test.py\", None, None, True)"'
 
       - name: Tag image
         run: |
